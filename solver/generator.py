@@ -122,3 +122,65 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
                 f"cost_{i}"
             )
         )
+
+    ##circuit constraint
+
+    #a single path that goes through all nodes
+    arcs = []
+
+    #add actual edges
+    for (from_index,to_index), edge_var in edge.items():
+        arcs.append((from_index, to_index, edge_var))
+
+    #add dropped nodes as self loops
+    #so this for loop makes dummy routes to satisfy the math formula or something like that?
+    for index, drop_var in is_dropped.items():
+        arcs.append((index, index, drop_var))
+
+
+    #the way cpmodel works is that it "only" works if the nodes are a roundtrip path
+    #so here we fake it by pointing the last node to the start
+    dummy_close = model.new_bool_var("dummy_close")
+    arcs.append((solver_input.end_index, solver_input.start_index, dummy_close))
+    model.add(dummy_close == 1) #force the dummy close edge to be used, this is needed to satisfy the circuit constraint math
+
+    model.add_circuit(arcs) 
+
+
+    ## start conditions
+    model.add(arrival_time[solver_input.start_index] == solver_input.day_start_time_in_minutes) #start at the start node at the start of the day
+    model.add(cumulative_cost[solver_input.start_index] == 0) #start with 0 cost
+
+
+    ## time windows
+    for i in range(num_nodes):
+        node = solver_input.nodes[i]
+        
+        #check if a node is mandatory or not
+        is_always_visited = (
+            i == solver_input.start_index
+            or i == solver_input.end_index
+            or node.priority == Priority.MANDATORY
+        )
+
+        if is_always_visited:
+            #if the node is mandatory, then we must arrive within the time window
+            model.add(arrival_time[i] >= node.time_window_start)
+            model.add(arrival_time[i] <= node.time_window_end)
+
+        elif i in is_dropped:
+            # only enforce if node is not dropped
+            model.add(arrival_time[i] >= node.time_window_start).only_enforce_if(is_dropped[i].Not())
+            model.add(arrival_time[i] <= node.time_window_end).only_enforce_if(is_dropped[i].Not())
+
+    ## time propagation
+    # ensures you can't arrive at j before finishing i + traveling
+    for (from_index, to_index), edge_var in edge.items():
+        
+        min_gap = (
+            solver_input.nodes[from_index].duration_in_minutes + solver_input.travel_time_matrix_in_minutes[from_index][to_index]
+        )
+        model.add(arrival_time[to_index] - arrival_time[from_index] >= min_gap).only_enforce_if(edge_var)
+        
+
+    
