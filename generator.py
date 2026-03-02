@@ -62,6 +62,7 @@ class SolverInput:
 @dataclass
 class SolverOutput:
     route: list[RouteEntry] = field(default_factory=list)
+    dropped_stops: list[int] = field(default_factory=list) ##hmmm
     total_travel_time_in_minutes: int = 0
     total_cost_in_cents: int = 0
     score: int = 0
@@ -101,7 +102,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
 
     ## time variables (clock time in minutes)
     ## i.e. 600 means 10:00am, 720 means 12:00pm, etc.
-    arrival_time = {}
+    arrival_time = []
 
     for i in range(num_nodes):
         arrival_time.append (
@@ -160,7 +161,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         is_always_visited = (
             i == solver_input.start_index
             or i == solver_input.end_index
-            or node.priority == Priority.MANDATORY
+            or node.Priority == Priority.MANDATORY
         )
 
         if is_always_visited:
@@ -270,6 +271,8 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return SolverOutput(has_solution=False)
     
+    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time, cumulative_cost)
+    
 def _extract_solution (
         solver: cp_model.CpSolver,
         solver_input: SolverInput,
@@ -300,7 +303,7 @@ def _extract_solution (
             break
 
         # collect dropped stops
-        dropped = [index for index, drop_variable in is_dropped.items() if solver.value(drop_variable)]
+        dropped = [index for index, drop_variable in is_dropped.items() if solver.Value(drop_variable)]
 
 
         #find next node
@@ -316,20 +319,20 @@ def _extract_solution (
         if not found_next:
             raise Exception("No next node found in solution path")
         
-        # get total travel time and travel cost for the route
-        total_Travel_time_in_minutes = 0
-        for i in range(len(route)-1):
+    # get total travel time and travel cost for the route
+    total_Travel_time_in_minutes = 0
+    for i in range(1,len(route)-1):
             prev_index = route[i-1].node_index
             current_index = route[i].node_index
             total_Travel_time_in_minutes += solver_input.travel_time_matrix_in_minutes[prev_index][current_index]
 
-        total_route_cost = solver.value(cumulative_cost[solver_input.end_index])
+    total_route_cost = solver.Value(cumulative_cost[solver_input.end_index])
 
-        return SolverOutput (
-            route=route,
-            dropped_stops = dropped,
-            total_travel_time_in_minutes=total_Travel_time_in_minutes,
-            total_cost_in_cents=total_route_cost,
-            score=solver.objective_value(),
-            has_solution=True
-        )
+    return SolverOutput (
+        route=route,
+        dropped_stops = dropped,
+        total_travel_time_in_minutes=total_Travel_time_in_minutes,
+        total_cost_in_cents=total_route_cost,
+        score=solver.objective_value,
+        has_solution=True
+    )
