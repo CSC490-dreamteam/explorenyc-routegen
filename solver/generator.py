@@ -284,4 +284,52 @@ def _extract_solution (
     current_index = solver_input.start_index
     visited = set()
 
+    while True:
+
+        arrival_time_for_current = solver.Value(arrival_time[current_index])
+        departure_time_for_current = arrival_time_for_current + solver_input.nodes[current_index].duration_in_minutes
     
+        route.append(RouteEntry(
+            node_index=current_index,
+            arrival_time_in_minutes=arrival_time_for_current,
+            departure_time_in_minutes=departure_time_for_current
+        ))
+        visited.add(current_index)
+
+        if current_index == solver_input.end_index:
+            break
+
+        # collect dropped stops
+        dropped = [index for index, drop_variable in is_dropped.items() if solver.value(drop_variable)]
+
+
+        #find next node
+        found_next = False
+        for j in range(num_nodes):
+            if j in visited or j == current_index:
+                continue
+            if (current_index, j) in edge and solver.Value(edge[(current_index, j)]) == 1:
+                current_index = j
+                found_next = True
+                break
+
+        if not found_next:
+            raise Exception("No next node found in solution path")
+        
+        # get total travel time and travel cost for the route
+        total_Travel_time_in_minutes = 0
+        for i in range(len(route)-1):
+            prev_index = route[i-1].node_index
+            current_index = route[i].node_index
+            total_Travel_time_in_minutes += solver_input.travel_time_matrix_in_minutes[prev_index][current_index]
+
+        total_route_cost = solver.value(cumulative_cost[solver_input.end_index])
+
+        return SolverOutput (
+            route=route,
+            dropped_stops = dropped,
+            total_travel_time_in_minutes=total_Travel_time_in_minutes,
+            total_cost_in_cents=total_route_cost,
+            score=solver.objective_value(),
+            has_solution=True
+        )
