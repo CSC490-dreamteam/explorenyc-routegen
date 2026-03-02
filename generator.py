@@ -266,6 +266,11 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
 
     #### SOLVER
     solver = cp_model.CpSolver()
+
+    solver.parameters.max_time_in_seconds = 2.0
+    solver.parameters.num_search_workers = 8
+    solver.parameters.enumerate_all_solutions = False
+
     status = solver.solve(model)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
