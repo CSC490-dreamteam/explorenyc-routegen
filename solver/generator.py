@@ -123,23 +123,23 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             )
         )
 
-    ##circuit constraint
+    ## circuit constraint
 
-    #a single path that goes through all nodes
+    # a single path that goes through all nodes
     arcs = []
 
-    #add actual edges
+    # add actual edges
     for (from_index,to_index), edge_var in edge.items():
         arcs.append((from_index, to_index, edge_var))
 
-    #add dropped nodes as self loops
-    #so this for loop makes dummy routes to satisfy the math formula or something like that?
-    for index, drop_var in is_dropped.items():
-        arcs.append((index, index, drop_var))
+    # add dropped nodes as self loops
+    # so this for loop makes dummy routes to satisfy the math formula or something like that?
+    for index, drop_variable in is_dropped.items():
+        arcs.append((index, index, drop_variable))
 
 
-    #the way cpmodel works is that it "only" works if the nodes are a roundtrip path
-    #so here we fake it by pointing the last node to the start
+    # the way cpmodel works is that it "only" works if the nodes are a roundtrip path
+    # so here we fake it by pointing the last node to the start
     dummy_close = model.new_bool_var("dummy_close")
     arcs.append((solver_input.end_index, solver_input.start_index, dummy_close))
     model.add(dummy_close == 1) #force the dummy close edge to be used, this is needed to satisfy the circuit constraint math
@@ -183,4 +183,91 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         model.add(arrival_time[to_index] - arrival_time[from_index] >= min_gap).only_enforce_if(edge_var)
         
 
+    ## cost propagation
+    # tracks entire transit expenditure along a route
+
+    for (from_index, to_index), edge_var in edge.items():
+        leg_cost = solver_input.travel_cost_matrix_in_cents[from_index][to_index]
+        model.add(cumulative_cost[to_index] - cumulative_cost[from_index] == leg_cost).only_enforce_if(edge_var)
+
+        # total cost must not exceed budget check
+        model.add(cumulative_cost[to_index] <= solver_input.budget_in_cents).only_enforce_if(edge_var)
+
+
+    
+    ## candidate groups
+    # only one member of each group is picked
+
+    for group in solver_input.candidate_groups:
+        visit_variables = []
+        for stop_index in group.stop_indices:
+            if stop_index in is_dropped:
+                visit_variables.append(is_dropped[stop_index].Not()) 
+                #if the node is optional, we add it to the candidate group
+        if visit_variables:
+            model.add_exactly_one(visit_variables)
+
+    ## excluded/deleted stops
+    # if a user deletes a stop, we can have the solver treat it as dead
+    for stop_index in solver_input.excluded_stops:
+        if stop_index in is_dropped:
+            model.add(is_dropped[stop_index] == 1)
+
+
+    ## precedence constraint
+    # force one node to occur before the other (but not necessarily immediately before)
+    for before_index, after_index in solver_input.precedences:
+        gap = solver_input.nodes[before_index].duration_in_minutes
+        model.add(arrival_time[after_index] - arrival_time[before_index] >= gap)
+
+    ## forced edges constraint
+    # force one node to occur immediately before the other
+    for before_index, after_index in solver_input.forced_edges:
+        if (before_index, after_index) in edge:
+            model.add(edge[(before_index, after_index)] == 1)
+
+    ## objective function
+    # defines how a route is scored by the time,cost and drop penalties, the solver will try to minimize this score
+
+
+    if solver_input.route_variant == RouteVariant.TIME_OPTIMIZED:
+        time_w, cost_w, penalty_w = 100, 0, 1000
+    elif solver_input.route_variant == RouteVariant.COST_OPTIMIZED:
+        time_w, cost_w, penalty_w = 0, 100, 1000
+    else:  #BALANCED
+        time_w, cost_w, penalty_w = 50, 50, 1000
+
+    objective_terms = []
+
+    #travel time
+    if time_w > 0:
+        for (from_index, to_index), edge_var in edge.items():
+            travel_time = solver_input.travel_time_matrix_in_minutes[from_index][to_index]
+            objective_terms.append(edge_var * travel_time * time_w)
+
+    #travel cost
+    if cost_w > 0:
+        objective_terms.append(cumulative_cost[solver_input.end_index] * cost_w)
+        #total cost is the cumulative cost at the end node
+
+    #drop penalties
+
+    for index, drop_variable in is_dropped.items():
+        drop_penalty = solver_input.nodes[index].drop_penalty
+        if drop_penalty > 0:
+            objective_terms.append(drop_variable * drop_penalty * penalty_w)
+
+    model.minimize(sum(objective_terms))
+
+
+
+
+
+    #### SOLVER
+    solver = cp_model.CpSolver()
+    status = solver.solve(model)
+
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return SolverOutput(has_solution=False)
+    
     
