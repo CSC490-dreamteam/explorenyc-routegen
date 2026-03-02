@@ -270,4 +270,18 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return SolverOutput(has_solution=False)
     
+def _extract_solution (
+        solver: cp_model.CpSolver,
+        solver_input: SolverInput,
+        edge: dict,
+        is_dropped: dict,
+        arrival_time: list,
+        cumulative_cost: list
+) -> SolverOutput:
+    ## goes from start to finish over each active edge to build a route
+    num_nodes = len(solver_input.nodes)
+    route = []
+    current_index = solver_input.start_index
+    visited = set()
+
     
