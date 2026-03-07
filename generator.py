@@ -15,7 +15,7 @@ class RouteVariant(IntEnum):
 
 @dataclass
 class SolverNode:
-    id :str
+    id: str
     name: str
     latitude: float
     longitude: float
@@ -26,9 +26,8 @@ class SolverNode:
     drop_penalty: int #higher values = harder to drop, 0 means mandatory
     candidate_group_id: str = ""
 
-
 @dataclass
-class CandidateGroup: #a group of candidates nodes, only one will be picked from the group to be put into the route
+class CandidateGroup: #a group of candidates nodes, only one will be+ picked from the group to be put into the route
     id: str
     stop_indices: list[int] #list of indices from the passed in nodes list
 
@@ -37,7 +36,6 @@ class RouteEntry: #a solved segment of the solved route
     node_index: int
     arrival_time_in_minutes: int #time to arrive at this node
     departure_time_in_minutes: int #time to leave this node
-
 
 @dataclass
 class SolverInput:
@@ -63,7 +61,7 @@ class SolverInput:
 class SolverOutput:
     route: list[RouteEntry] = field(default_factory=list)
     dropped_stops: list[int] = field(default_factory=list) ##hmmm
-    total_travel_time_in_minutes: int = 0
+    total_time_in_minutes: int = 0
     total_cost_in_cents: int = 0
     score: int = 0
     has_solution: bool = False #if true then the route is possible, if false then the route is impossible given the constraints
@@ -71,6 +69,39 @@ class SolverOutput:
 def generate_route(solver_input: SolverInput) -> SolverOutput:
     model = cp_model.CpModel()
     num_nodes = len(solver_input.nodes)
+
+    # Handle round-trip: duplicate the start node as a virtual end node
+    ## TODO MOVE TO go??
+    round_trip = solver_input.start_index == solver_input.end_index
+    if round_trip:
+        # Copy the start node as a virtual end node
+        virtual_end = num_nodes
+        num_nodes += 1
+        start_node = solver_input.nodes[solver_input.start_index]
+        solver_input.nodes.append(SolverNode(
+            id=f"{start_node.id}_end",
+            name=start_node.name,
+            latitude=start_node.latitude,
+            longitude=start_node.longitude,
+            duration_in_minutes=0,
+            time_window_start=start_node.time_window_start,
+            time_window_end=start_node.time_window_end,
+            Priority=start_node.Priority,
+            drop_penalty=0,
+        ))
+        # Extend matrices with the same row/col as start
+        src = solver_input.start_index
+        for row in solver_input.travel_time_matrix_in_minutes:
+            row.append(row[src])
+        solver_input.travel_time_matrix_in_minutes.append(
+            list(solver_input.travel_time_matrix_in_minutes[src])
+        )
+        for row in solver_input.travel_cost_matrix_in_cents:
+            row.append(row[src])
+        solver_input.travel_cost_matrix_in_cents.append(
+            list(solver_input.travel_cost_matrix_in_cents[src])
+        )
+        solver_input.end_index = virtual_end
 
 
     ## add edges to the model
@@ -276,7 +307,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return SolverOutput(has_solution=False)
     
-    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time, cumulative_cost)
+    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time, cumulative_cost,round_trip)
     
 def _extract_solution (
         solver: cp_model.CpSolver,
@@ -284,7 +315,8 @@ def _extract_solution (
         edge: dict,
         is_dropped: dict,
         arrival_time: list,
-        cumulative_cost: list
+        cumulative_cost: list,
+        round_trip: bool = False
 ) -> SolverOutput:
     ## goes from start to finish over each active edge to build a route
     num_nodes = len(solver_input.nodes)
@@ -330,13 +362,16 @@ def _extract_solution (
         current_index = route[i].node_index
         total_Travel_time_in_minutes += solver_input.travel_time_matrix_in_minutes[prev_index][current_index]
 
-    total_route_cost = solver.Value(cumulative_cost[solver_input.end_index])
+    total_route_cost = solver.Value(cumulative_cost[route[-1].node_index]) #cumulative cost at the end node is the total route cost
+
+    if round_trip and route:
+        route.pop()
 
     return SolverOutput (
         route=route,
         dropped_stops = dropped,
-        total_travel_time_in_minutes=total_Travel_time_in_minutes,
+        total_time_in_minutes=total_Travel_time_in_minutes,
         total_cost_in_cents=total_route_cost,
-        score=solver.objective_value,
+        score= int(solver.objective_value),
         has_solution=True
     )
