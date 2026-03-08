@@ -103,6 +103,12 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         )
         solver_input.end_index = virtual_end
 
+        # make virtual end node have 0 travel time and cost to all nodes (including itself)
+        for row in solver_input.travel_time_matrix_in_minutes:
+            row[virtual_end] = 0
+        for row in solver_input.travel_cost_matrix_in_cents:
+            row[virtual_end] = 0
+
 
     ## add edges to the model
     edge = {}
@@ -355,6 +361,11 @@ def _extract_solution (
     # collect dropped stops
     dropped = [index for index, drop_variable in is_dropped.items() if solver.Value(drop_variable)]
         
+
+    if round_trip and route:
+        route.pop() #remove dummy end node
+
+
     # get total travel time and travel cost for the route
     total_Travel_time_in_minutes = 0
     for i in range(1,len(route)):
@@ -364,8 +375,7 @@ def _extract_solution (
 
     total_route_cost = solver.Value(cumulative_cost[route[-1].node_index]) #cumulative cost at the end node is the total route cost
 
-    if round_trip and route:
-        route.pop()
+    
 
     return SolverOutput (
         route=route,
