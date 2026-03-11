@@ -149,6 +149,20 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
                 f"arrival_time_{i}"
             )
         )
+
+
+    ##duration variables
+    duration = []
+    for i in range(num_nodes):
+        node = solver_input.nodes[i]
+        duration.append(
+            model.new_int_var(
+                node.duration_in_minutes,
+                int(node.duration_in_minutes*2.5), ##placeholder
+                f"duration_{i}"
+            )
+        )
+
         
     ## cost variables (in cents)
     cumulative_cost = []
@@ -213,12 +227,9 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
 
     ## time propagation
     # ensures you can't arrive at j before finishing i + traveling
-    for (from_index, to_index), edge_var in edge.items():
-        
-        min_gap = (
-            solver_input.nodes[from_index].duration_in_minutes + solver_input.travel_time_matrix_in_minutes[from_index][to_index]
-        )
-        model.add(arrival_time[to_index] - arrival_time[from_index] >= min_gap).only_enforce_if(edge_var)
+    for (from_index, to_index), edge_var in edge.items():  
+        travel = solver_input.travel_time_matrix_in_minutes[from_index][to_index]
+        model.add(arrival_time[to_index] - arrival_time[from_index] - duration[from_index] >= travel).only_enforce_if(edge_var)
         
 
     ## cost propagation
@@ -232,25 +243,29 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         model.add(cumulative_cost[to_index] <= solver_input.budget_in_cents).only_enforce_if(edge_var)
 
 
+    ## idle time
     idle_time = {}
     for (from_index, to_index), edge_var in edge.items():
+        
+        ##its just an upper bound not the actual idle max, each minute of idle is penaltied agaisnt the score
         max_possible_idle = solver_input.day_end_time_in_minutes - solver_input.day_start_time_in_minutes
         idle = model.new_int_var(0, max_possible_idle, f"idle_{from_index}_{to_index}")
 
         #when edge is active: idle = arrival[j] - arrival[i] - duration[i] - travel[i][j]
         travel = solver_input.travel_time_matrix_in_minutes[from_index][to_index]
-        duration = solver_input.nodes[from_index].duration_in_minutes
         model.add(
-            idle == arrival_time[to_index] - arrival_time[from_index] - duration - travel
+            idle == arrival_time[to_index] - arrival_time[from_index] - duration[from_index] - travel
         ).only_enforce_if(edge_var)
 
-        #when edge is inactive: idle = 0
+        #when edge is inactive: idle = 0 
         model.add(idle == 0).only_enforce_if(edge_var.Not())
 
         idle_time[(from_index, to_index)] = idle
 
 
-    
+
+
+   
     ## candidate groups
     # only one member of each group is picked
 
@@ -313,6 +328,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         if drop_penalty > 0:
             objective_terms.append(drop_variable * drop_penalty * penalty_w)
 
+    #idle penalty
     idle_w = 30  #penalize each minute of dead time
     for (from_index, to_index), idle_var in idle_time.items():
         objective_terms.append(idle_var * idle_w)
@@ -335,7 +351,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return SolverOutput(has_solution=False)
     
-    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time, cumulative_cost,round_trip)
+    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time, cumulative_cost, duration,round_trip)
     
 def _extract_solution (
         solver: cp_model.CpSolver,
@@ -344,6 +360,7 @@ def _extract_solution (
         is_dropped: dict,
         arrival_time: list,
         cumulative_cost: list,
+        duration: list,
         round_trip: bool = False
 ) -> SolverOutput:
     ## goes from start to finish over each active edge to build a route
@@ -355,7 +372,7 @@ def _extract_solution (
     while True:
 
         arrival_time_for_current = solver.Value(arrival_time[current_index])
-        departure_time_for_current = arrival_time_for_current + solver_input.nodes[current_index].duration_in_minutes
+        departure_time_for_current = arrival_time_for_current + solver.Value(duration[current_index])
     
         route.append(RouteEntry(
             node_index=current_index,
