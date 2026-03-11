@@ -232,6 +232,24 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         model.add(cumulative_cost[to_index] <= solver_input.budget_in_cents).only_enforce_if(edge_var)
 
 
+    idle_time = {}
+    for (from_index, to_index), edge_var in edge.items():
+        max_possible_idle = solver_input.day_end_time_in_minutes - solver_input.day_start_time_in_minutes
+        idle = model.new_int_var(0, max_possible_idle, f"idle_{from_index}_{to_index}")
+
+        #when edge is active: idle = arrival[j] - arrival[i] - duration[i] - travel[i][j]
+        travel = solver_input.travel_time_matrix_in_minutes[from_index][to_index]
+        duration = solver_input.nodes[from_index].duration_in_minutes
+        model.add(
+            idle == arrival_time[to_index] - arrival_time[from_index] - duration - travel
+        ).only_enforce_if(edge_var)
+
+        #when edge is inactive: idle = 0
+        model.add(idle == 0).only_enforce_if(edge_var.Not())
+
+        idle_time[(from_index, to_index)] = idle
+
+
     
     ## candidate groups
     # only one member of each group is picked
@@ -294,6 +312,10 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         drop_penalty = solver_input.nodes[index].drop_penalty
         if drop_penalty > 0:
             objective_terms.append(drop_variable * drop_penalty * penalty_w)
+
+    idle_w = 30  #penalize each minute of dead time
+    for (from_index, to_index), idle_var in idle_time.items():
+        objective_terms.append(idle_var * idle_w)
 
     model.minimize(sum(objective_terms))
 
