@@ -163,6 +163,23 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             )
         )
 
+    ## adapt acvitity start if its an appointment time or not
+    activity_start = []
+    for i in range(num_nodes):
+        node = solver_input.nodes[i]
+        #check if this stop has narrowed time windows (an appointment)
+        #if so, start the activity at the preferred time (window_end + appt buffer)
+        appt_buffer = 5 #minutes after the end of the time window to start the activity
+        if node.time_window_end != solver_input.day_end_time_in_minutes:
+            a = model.new_int_var(
+                node.time_window_end + appt_buffer, node.time_window_end + appt_buffer,
+                f"activity_start_{i}"
+            )
+        else:
+            #no appointment: activity starts immediately on arrival
+            a = arrival_time[i]
+        activity_start.append(a)
+
         
     ## cost variables (in cents)
     cumulative_cost = []
@@ -229,7 +246,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     # ensures you can't arrive at j before finishing i + traveling
     for (from_index, to_index), edge_var in edge.items():  
         travel = solver_input.travel_time_matrix_in_minutes[from_index][to_index]
-        model.add(arrival_time[to_index] - arrival_time[from_index] - duration[from_index] >= travel).only_enforce_if(edge_var)
+        model.add(arrival_time[to_index] - activity_start[from_index] - duration[from_index] >= travel).only_enforce_if(edge_var)
         
 
     ## cost propagation
@@ -300,7 +317,6 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     ## objective function
     # defines how a route is scored by the time,cost and drop penalties, the solver will try to minimize this score
 
-
     if solver_input.route_variant == RouteVariant.TIME_OPTIMIZED:
         time_w, cost_w, penalty_w = 100, 0, 1000
     elif solver_input.route_variant == RouteVariant.COST_OPTIMIZED:
@@ -341,7 +357,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
 
     #### SOLVER
     solver = cp_model.CpSolver()
-
+    ## MAX RUN TIME
     solver.parameters.max_time_in_seconds = 2.0
     solver.parameters.num_search_workers = 8
     solver.parameters.enumerate_all_solutions = False
@@ -351,7 +367,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return SolverOutput(has_solution=False)
     
-    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time, cumulative_cost, duration,round_trip)
+    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time, cumulative_cost, duration,round_trip, activity_start)
     
 def _extract_solution (
         solver: cp_model.CpSolver,
@@ -361,7 +377,8 @@ def _extract_solution (
         arrival_time: list,
         cumulative_cost: list,
         duration: list,
-        round_trip: bool = False
+        round_trip: bool = False,
+        activity_start: list = None
 ) -> SolverOutput:
     ## goes from start to finish over each active edge to build a route
     num_nodes = len(solver_input.nodes)
@@ -372,7 +389,8 @@ def _extract_solution (
     while True:
 
         arrival_time_for_current = solver.Value(arrival_time[current_index])
-        departure_time_for_current = arrival_time_for_current + solver.Value(duration[current_index])
+        activity_start_for_current = solver.Value(activity_start[current_index])
+        departure_time_for_current = activity_start_for_current + solver.Value(duration[current_index])
     
         route.append(RouteEntry(
             node_index=current_index,
