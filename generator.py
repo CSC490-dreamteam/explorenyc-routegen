@@ -271,7 +271,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         #when edge is active: idle = arrival[j] - arrival[i] - duration[i] - travel[i][j]
         travel = solver_input.travel_time_matrix_in_minutes[from_index][to_index]
         model.add(
-            idle == arrival_time[to_index] - arrival_time[from_index] - duration[from_index] - travel
+            idle == arrival_time[to_index] - activity_start[from_index] - duration[from_index] - travel
         ).only_enforce_if(edge_var)
 
         #when edge is inactive: idle = 0 
@@ -345,7 +345,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             objective_terms.append(drop_variable * drop_penalty * penalty_w)
 
     #idle penalty
-    idle_w = 30  #penalize each minute of dead time
+    idle_w = 50  #penalize each minute of dead time
     for (from_index, to_index), idle_var in idle_time.items():
         objective_terms.append(idle_var * idle_w)
 
