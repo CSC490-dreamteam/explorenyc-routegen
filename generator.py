@@ -157,11 +157,29 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         node = solver_input.nodes[i]
         duration.append(
             model.new_int_var(
-                node.duration_in_minutes,
-                int(node.duration_in_minutes*2.5), ##placeholder
+                node.duration_in_minutes, # min duration is the actual duration
+                int(node.duration_in_minutes* 3 //2 ), ##placeholder
                 f"duration_{i}"
             )
         )
+
+    ## duration extension penalty
+    duration_ext = []
+    for i in range(num_nodes):
+        node = solver_input.nodes[i]
+        base = node.duration_in_minutes
+        max_extension = (base * 3 // 2) - base
+        extension = model.new_int_var(0, max_extension, f"duration_ext_{i}")
+        model.add(extension == duration[i] - base)
+
+        if i in is_dropped:
+            model.add(extension == 0).only_enforce_if(is_dropped[i])
+
+        duration_ext.append(extension)
+
+
+
+
 
     ## adapt acvitity start if its an appointment time or not
     activity_start = []
@@ -349,7 +367,23 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     for (from_index, to_index), idle_var in idle_time.items():
         objective_terms.append(idle_var * idle_w)
 
+
+
+    ## duration extension penalty
+    duration_ext_w = 30
+    for i in range(num_nodes):
+        if i in (solver_input.start_index, solver_input.end_index):
+            continue
+        objective_terms.append(duration_ext[i] * duration_ext_w)
+
+
+
+
+
     model.minimize(sum(objective_terms))
+
+    
+
 
 
 
