@@ -73,41 +73,47 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     # Handle round-trip: duplicate the start node as a virtual end node
     ## TODO MOVE TO go??
     round_trip = solver_input.start_index == solver_input.end_index
-    if round_trip:
-        # Copy the start node as a virtual end node
+    open_end = solver_input.end_index == -1
+    needs_virtual_end = round_trip or open_end
+
+
+    
+    if needs_virtual_end:
         virtual_end = num_nodes
         num_nodes += 1
-        start_node = solver_input.nodes[solver_input.start_index]
+
+        #pick a template node to clone metadata off of
+        template = solver_input.nodes[solver_input.start_index]
         solver_input.nodes.append(SolverNode(
-            id=f"{start_node.id}_end",
-            name=start_node.name,
-            latitude=start_node.latitude,
-            longitude=start_node.longitude,
+            id="virtual_end",
+            name=template.name,
+            latitude=template.latitude,
+            longitude=template.longitude,
             duration_in_minutes=0,
-            time_window_start=start_node.time_window_start,
-            time_window_end=start_node.time_window_end,
-            Priority=start_node.Priority,
+            time_window_start=solver_input.day_start_time_in_minutes,
+            time_window_end=solver_input.day_end_time_in_minutes,
+            Priority=Priority.MANDATORY,
             drop_penalty=0,
         ))
-        # Extend matrices with the same row/col as start
-        src = solver_input.start_index
-        for row in solver_input.travel_time_matrix_in_minutes:
-            row.append(row[src])
-        solver_input.travel_time_matrix_in_minutes.append(
-            list(solver_input.travel_time_matrix_in_minutes[src])
-        )
-        for row in solver_input.travel_cost_matrix_in_cents:
-            row.append(row[src])
-        solver_input.travel_cost_matrix_in_cents.append(
-            list(solver_input.travel_cost_matrix_in_cents[src])
-        )
-        solver_input.end_index = virtual_end
 
-        # make virtual end node have 0 travel time and cost to all nodes (including itself)
-        for row in solver_input.travel_time_matrix_in_minutes:
-            row[virtual_end] = 0
-        for row in solver_input.travel_cost_matrix_in_cents:
-            row[virtual_end] = 0
+        if round_trip:
+            src = solver_input.start_index
+            for row in solver_input.travel_time_matrix_in_minutes:
+                row.append(row[src])
+            for row in solver_input.travel_cost_matrix_in_cents:
+                row.append(row[src])
+        else:
+            #open_end: reaching virtual_end is free from any real node
+            for row in solver_input.travel_time_matrix_in_minutes:
+                row.append(0)
+            for row in solver_input.travel_cost_matrix_in_cents:
+                row.append(0)
+
+        #outgoing edges FROM virtual_end are all 0 (it's the terminal; nothing comes after)
+        solver_input.travel_time_matrix_in_minutes.append([0] * num_nodes)
+        solver_input.travel_cost_matrix_in_cents.append([0] * num_nodes)
+
+        solver_input.end_index = virtual_end
 
 
     ## add edges to the model
@@ -403,7 +409,11 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return SolverOutput(has_solution=False)
     
-    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time, cumulative_cost, duration,round_trip, activity_start)
+    
+    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time,
+                         cumulative_cost, duration, needs_virtual_end, 
+                          round_trip, activity_start)
+
     
 def _extract_solution (
         solver: cp_model.CpSolver,
@@ -413,8 +423,10 @@ def _extract_solution (
         arrival_time: list,
         cumulative_cost: list,
         duration: list,
+        has_virtual_end: bool = False,
         round_trip: bool = False,
         activity_start: list = None
+        
 ) -> SolverOutput:
     ## goes from start to finish over each active edge to build a route
     num_nodes = len(solver_input.nodes)
@@ -452,11 +464,17 @@ def _extract_solution (
             raise Exception("No next node found in solution path")
         
     # collect dropped stops
-    dropped = [index for index, drop_variable in is_dropped.items() if solver.Value(drop_variable)]
-        
-
-    if round_trip and route:
-        route.pop() #remove dummy end node
+    dropped = [index for index, drop_variable in is_dropped.items() if solver.Value(drop_variable)]   
+   
+    if has_virtual_end and route:
+        virtual_entry = route.pop()  # remove dummy end node
+        if round_trip:
+            # Add the real start node back as the final stop to represent returning home
+            route.append(RouteEntry(
+                node_index=solver_input.start_index,
+                arrival_time_in_minutes=virtual_entry.arrival_time_in_minutes,
+                departure_time_in_minutes=virtual_entry.arrival_time_in_minutes,
+            ))
 
 
     # get total travel time and travel cost for the route
