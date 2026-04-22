@@ -466,10 +466,18 @@ def _extract_solution (
     # collect dropped stops
     dropped = [index for index, drop_variable in is_dropped.items() if solver.Value(drop_variable)]   
    
+    if has_virtual_end:
+        terminal_index = solver_input.end_index #still virtual_end at this point
+    else:
+        terminal_index = route[-1].node_index
+
+        
+    total_route_cost = solver.Value(cumulative_cost[terminal_index])
+
     if has_virtual_end and route:
         virtual_entry = route.pop()  # remove dummy end node
         if round_trip:
-            # Add the real start node back as the final stop to represent returning home
+            #add the real start node back as the final stop to represent returning home
             route.append(RouteEntry(
                 node_index=solver_input.start_index,
                 arrival_time_in_minutes=virtual_entry.arrival_time_in_minutes,
@@ -477,14 +485,12 @@ def _extract_solution (
             ))
 
 
-    # get total travel time and travel cost for the route
+    # get total travel time for the route
     total_Travel_time_in_minutes = 0
     for i in range(1,len(route)):
         prev_index = route[i-1].node_index
         current_index = route[i].node_index
         total_Travel_time_in_minutes += solver_input.travel_time_matrix_in_minutes[prev_index][current_index]
-
-    total_route_cost = solver.Value(cumulative_cost[route[-1].node_index]) #cumulative cost at the end node is the total route cost
 
     
 
