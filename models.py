@@ -24,6 +24,9 @@ class SolverNode:
     Priority: Priority
     drop_penalty: int #higher values = harder to drop, 0 means mandatory
     candidate_group_id: str = ""
+    # advanced mode: per-stop ceiling on duration elasticity (absolute minutes).
+    # None -> fall back to the default 1.5x of duration_in_minutes.
+    max_duration_in_minutes: Optional[int] = None
 
 @dataclass
 class CandidateGroup: #a group of candidates nodes, only one will be+ picked from the group to be put into the route

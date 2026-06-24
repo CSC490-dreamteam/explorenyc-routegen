@@ -13,6 +13,7 @@ def generate_route(solver_input: SolverInput, config: SolverConfig = None) -> So
 
     num_nodes, needs_virtual_end, round_trip = _add_virtual_end_node(solver_input, num_nodes)
 
+    # set variables
     edge = _build_edges(model, solver_input, num_nodes)
     is_dropped = _build_drop_variables(model, solver_input, num_nodes)
     arrival_time = _build_arrival_time_variables(model, solver_input, num_nodes)
@@ -21,6 +22,7 @@ def generate_route(solver_input: SolverInput, config: SolverConfig = None) -> So
     activity_start = _build_activity_start(model, solver_input, num_nodes, arrival_time)
     cumulative_cost = _build_cumulative_cost_variables(model, solver_input, num_nodes)
 
+    # add constraints
     _add_circuit_constraint(model, solver_input, edge, is_dropped)
     _add_start_conditions(model, solver_input, arrival_time, cumulative_cost)
     _add_time_windows(model, solver_input, num_nodes, arrival_time, is_dropped)
@@ -32,6 +34,7 @@ def generate_route(solver_input: SolverInput, config: SolverConfig = None) -> So
     _add_precedence_constraints(model, solver_input, arrival_time)
     _add_forced_edges_constraint(model, solver_input, edge)
 
+    # build model
     objective_terms = _build_objective(
         solver_input, config, edge, cumulative_cost, is_dropped,
         idle_time, duration_ext, num_nodes
@@ -148,6 +151,14 @@ def _build_arrival_time_variables(model: cp_model.CpModel, solver_input: SolverI
     return arrival_time
 
 
+def _node_max_duration(node: SolverNode) -> int:
+    ## per-stop ceiling on duration elasticity
+    # advanced mode: explicit per-stop ceiling; else the 1.5x placeholder default.
+    if node.max_duration_in_minutes is not None:
+        return max(node.max_duration_in_minutes, node.duration_in_minutes)  # clamp: never below the min
+    return node.duration_in_minutes * 3 // 2
+
+
 def _build_duration_variables(model: cp_model.CpModel, solver_input: SolverInput, num_nodes: int) -> list:
     ##duration variables
     duration = []
@@ -156,7 +167,7 @@ def _build_duration_variables(model: cp_model.CpModel, solver_input: SolverInput
         duration.append(
             model.new_int_var(
                 node.duration_in_minutes, # min duration is the actual duration
-                int(node.duration_in_minutes* 3 //2 ), ##placeholder
+                _node_max_duration(node),
                 f"duration_{i}"
             )
         )
@@ -170,7 +181,7 @@ def _build_duration_extension(model: cp_model.CpModel, solver_input: SolverInput
     for i in range(num_nodes):
         node = solver_input.nodes[i]
         base = node.duration_in_minutes
-        max_extension = (base * 3 // 2) - base
+        max_extension = _node_max_duration(node) - base
         extension = model.new_int_var(0, max_extension, f"duration_ext_{i}")
         model.add(extension == duration[i] - base)
 
