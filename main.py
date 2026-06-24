@@ -1,7 +1,8 @@
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, status
-from generator import SolverInput, SolverOutput, generate_route as solve_route
+from models import SolverInput, SolverOutput
+from solver import generate_route as solve_route
 
 app = FastAPI()
 

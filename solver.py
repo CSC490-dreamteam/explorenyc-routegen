@@ -1,75 +1,55 @@
 from ortools.sat.python import cp_model
-from dataclasses import dataclass, field
-from enum import IntEnum
-from typing import Optional
+from models import Priority, SolverNode, SolverInput, SolverOutput
+from config import SolverConfig
+from extraction import _extract_solution
 
-class Priority(IntEnum): #priority of a given stop
-    MANDATORY = 0
-    WANT_TO_SEE = 1
-    OPTIONAL = 2
 
-class RouteVariant(IntEnum):
-    TIME_OPTIMIZED = 0
-    COST_OPTIMIZED = 1
-    BALANCED = 2
+def generate_route(solver_input: SolverInput, config: SolverConfig = None) -> SolverOutput:
+    if config is None:
+        config = SolverConfig.from_route_variant(solver_input.route_variant)
 
-@dataclass
-class SolverNode:
-    id: str
-    name: str
-    latitude: float
-    longitude: float
-    duration_in_minutes: int
-    time_window_start: int
-    time_window_end: int
-    Priority: Priority
-    drop_penalty: int #higher values = harder to drop, 0 means mandatory
-    candidate_group_id: str = ""
-
-@dataclass
-class CandidateGroup: #a group of candidates nodes, only one will be+ picked from the group to be put into the route
-    id: str
-    stop_indices: list[int] #list of indices from the passed in nodes list
-
-@dataclass
-class RouteEntry: #a solved segment of the solved route
-    node_index: int
-    arrival_time_in_minutes: int #time to arrive at this node
-    departure_time_in_minutes: int #time to leave this node
-
-@dataclass
-class SolverInput:
-    nodes: list[SolverNode]
-    start_index: int
-    end_index: int
-    day_start_time_in_minutes: int
-    day_end_time_in_minutes: int
-    budget_in_cents: int
-    travel_time_matrix_in_minutes: list[list[int]]
-    travel_cost_matrix_in_cents: list[list[int]]
-    candidate_groups: list[CandidateGroup] = field(default_factory=list)
-    route_variant: RouteVariant = RouteVariant.BALANCED
-
-    ##### maybe unusued #####
-    #list of tuples of node indices where the first index must be visited before the second index
-    precedences: list[tuple[int, int]] = field(default_factory=list)
-    #list of tuples of node indices where the first index must be visited immediately before the second index
-    forced_edges: list[tuple[int, int]] = field(default_factory=list)
-    excluded_stops: list[int] = field(default_factory=list)
-
-@dataclass
-class SolverOutput:
-    route: list[RouteEntry] = field(default_factory=list)
-    dropped_stops: list[int] = field(default_factory=list) ##hmmm
-    total_time_in_minutes: int = 0
-    total_cost_in_cents: int = 0
-    score: int = 0
-    has_solution: bool = False #if true then the route is possible, if false then the route is impossible given the constraints
-    
-def generate_route(solver_input: SolverInput) -> SolverOutput:
     model = cp_model.CpModel()
     num_nodes = len(solver_input.nodes)
 
+    num_nodes, needs_virtual_end, round_trip = _add_virtual_end_node(solver_input, num_nodes)
+
+    edge = _build_edges(model, solver_input, num_nodes)
+    is_dropped = _build_drop_variables(model, solver_input, num_nodes)
+    arrival_time = _build_arrival_time_variables(model, solver_input, num_nodes)
+    duration = _build_duration_variables(model, solver_input, num_nodes)
+    duration_ext = _build_duration_extension(model, solver_input, num_nodes, duration, is_dropped)
+    activity_start = _build_activity_start(model, solver_input, num_nodes, arrival_time)
+    cumulative_cost = _build_cumulative_cost_variables(model, solver_input, num_nodes)
+
+    _add_circuit_constraint(model, solver_input, edge, is_dropped)
+    _add_start_conditions(model, solver_input, arrival_time, cumulative_cost)
+    _add_time_windows(model, solver_input, num_nodes, arrival_time, is_dropped)
+    _add_time_propagation(model, solver_input, edge, arrival_time, activity_start, duration)
+    _add_cost_propagation(model, solver_input, edge, cumulative_cost)
+    idle_time = _add_idle_time(model, solver_input, edge, arrival_time, activity_start, duration)
+    _add_candidate_group_constraints(model, solver_input, is_dropped)
+    _add_excluded_stops_constraint(model, solver_input, is_dropped)
+    _add_precedence_constraints(model, solver_input, arrival_time)
+    _add_forced_edges_constraint(model, solver_input, edge)
+
+    objective_terms = _build_objective(
+        solver_input, config, edge, cumulative_cost, is_dropped,
+        idle_time, duration_ext, num_nodes
+    )
+    model.minimize(sum(objective_terms))
+
+    solver = _configure_solver(config)
+    status = solver.solve(model)
+
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return SolverOutput(has_solution=False)
+
+    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time,
+                         cumulative_cost, duration, needs_virtual_end,
+                          round_trip, activity_start)
+
+
+def _add_virtual_end_node(solver_input: SolverInput, num_nodes: int) -> tuple[int, bool, bool]:
     # Handle round-trip: duplicate the start node as a virtual end node
     ## TODO MOVE TO go??
     round_trip = solver_input.start_index == solver_input.end_index
@@ -77,7 +57,7 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     needs_virtual_end = round_trip or open_end
 
 
-    
+
     if needs_virtual_end:
         virtual_end = num_nodes
         num_nodes += 1
@@ -115,7 +95,10 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
 
         solver_input.end_index = virtual_end
 
+    return num_nodes, needs_virtual_end, round_trip
 
+
+def _build_edges(model: cp_model.CpModel, solver_input: SolverInput, num_nodes: int) -> dict:
     ## add edges to the model
     edge = {}
 
@@ -130,7 +113,10 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
                 continue
             edge [(i,j)] = model.new_bool_var(f"edge_{i}_{j}") #add edge to model
 
+    return edge
 
+
+def _build_drop_variables(model: cp_model.CpModel, solver_input: SolverInput, num_nodes: int) -> dict:
     ## indicate which nodes are droppable
     is_dropped = {} #dictionary of possble nodes to drop
 
@@ -142,7 +128,10 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             continue
         is_dropped[i] = model.new_bool_var(f"is_dropped_{i}") #tell the model which nodes can be dropped
 
+    return is_dropped
 
+
+def _build_arrival_time_variables(model: cp_model.CpModel, solver_input: SolverInput, num_nodes: int) -> list:
     ## time variables (clock time in minutes)
     ## i.e. 600 means 10:00am, 720 means 12:00pm, etc.
     arrival_time = []
@@ -156,7 +145,10 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             )
         )
 
+    return arrival_time
 
+
+def _build_duration_variables(model: cp_model.CpModel, solver_input: SolverInput, num_nodes: int) -> list:
     ##duration variables
     duration = []
     for i in range(num_nodes):
@@ -169,6 +161,10 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             )
         )
 
+    return duration
+
+
+def _build_duration_extension(model: cp_model.CpModel, solver_input: SolverInput, num_nodes: int, duration: list, is_dropped: dict) -> list:
     ## duration extension penalty
     duration_ext = []
     for i in range(num_nodes):
@@ -183,10 +179,10 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
 
         duration_ext.append(extension)
 
+    return duration_ext
 
 
-
-
+def _build_activity_start(model: cp_model.CpModel, solver_input: SolverInput, num_nodes: int, arrival_time: list) -> list:
     ## adapt acvitity start if its an appointment time or not
     activity_start = []
     for i in range(num_nodes):
@@ -204,7 +200,10 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             a = arrival_time[i]
         activity_start.append(a)
 
-        
+    return activity_start
+
+
+def _build_cumulative_cost_variables(model: cp_model.CpModel, solver_input: SolverInput, num_nodes: int) -> list:
     ## cost variables (in cents)
     cumulative_cost = []
     for i in range(num_nodes):
@@ -216,6 +215,10 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             )
         )
 
+    return cumulative_cost
+
+
+def _add_circuit_constraint(model: cp_model.CpModel, solver_input: SolverInput, edge: dict, is_dropped: dict) -> None:
     ## circuit constraint
 
     # a single path that goes through all nodes
@@ -237,18 +240,20 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
     arcs.append((solver_input.end_index, solver_input.start_index, dummy_close))
     model.add(dummy_close == 1) #force the dummy close edge to be used, this is needed to satisfy the circuit constraint math
 
-    model.add_circuit(arcs) 
+    model.add_circuit(arcs)
 
 
+def _add_start_conditions(model: cp_model.CpModel, solver_input: SolverInput, arrival_time: list, cumulative_cost: list) -> None:
     ## start conditions
     model.add(arrival_time[solver_input.start_index] == solver_input.day_start_time_in_minutes) #start at the start node at the start of the day
     model.add(cumulative_cost[solver_input.start_index] == 0) #start with 0 cost
 
 
+def _add_time_windows(model: cp_model.CpModel, solver_input: SolverInput, num_nodes: int, arrival_time: list, is_dropped: dict) -> None:
     ## time windows
     for i in range(num_nodes):
         node = solver_input.nodes[i]
-        
+
         #check if a node is mandatory or not
         is_always_visited = (
             i == solver_input.start_index
@@ -266,13 +271,16 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             model.add(arrival_time[i] >= node.time_window_start).only_enforce_if(is_dropped[i].Not())
             model.add(arrival_time[i] <= node.time_window_end).only_enforce_if(is_dropped[i].Not())
 
+
+def _add_time_propagation(model: cp_model.CpModel, solver_input: SolverInput, edge: dict, arrival_time: list, activity_start: list, duration: list) -> None:
     ## time propagation
     # ensures you can't arrive at j before finishing i + traveling
-    for (from_index, to_index), edge_var in edge.items():  
+    for (from_index, to_index), edge_var in edge.items():
         travel = solver_input.travel_time_matrix_in_minutes[from_index][to_index]
         model.add(arrival_time[to_index] - activity_start[from_index] - duration[from_index] >= travel).only_enforce_if(edge_var)
-        
 
+
+def _add_cost_propagation(model: cp_model.CpModel, solver_input: SolverInput, edge: dict, cumulative_cost: list) -> None:
     ## cost propagation
     # tracks entire transit expenditure along a route
 
@@ -284,10 +292,11 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         model.add(cumulative_cost[to_index] <= solver_input.budget_in_cents).only_enforce_if(edge_var)
 
 
+def _add_idle_time(model: cp_model.CpModel, solver_input: SolverInput, edge: dict, arrival_time: list, activity_start: list, duration: list) -> dict:
     ## idle time
     idle_time = {}
     for (from_index, to_index), edge_var in edge.items():
-        
+
         ##its just an upper bound not the actual idle max, each minute of idle is penaltied agaisnt the score
         max_possible_idle = solver_input.day_end_time_in_minutes - solver_input.day_start_time_in_minutes
         idle = model.new_int_var(0, max_possible_idle, f"idle_{from_index}_{to_index}")
@@ -298,15 +307,15 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             idle == arrival_time[to_index] - activity_start[from_index] - duration[from_index] - travel
         ).only_enforce_if(edge_var)
 
-        #when edge is inactive: idle = 0 
+        #when edge is inactive: idle = 0
         model.add(idle == 0).only_enforce_if(edge_var.Not())
 
         idle_time[(from_index, to_index)] = idle
 
+    return idle_time
 
 
-
-   
+def _add_candidate_group_constraints(model: cp_model.CpModel, solver_input: SolverInput, is_dropped: dict) -> None:
     ## candidate groups
     # only one member of each group is picked
 
@@ -314,11 +323,13 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
         visit_variables = []
         for stop_index in group.stop_indices:
             if stop_index in is_dropped:
-                visit_variables.append(is_dropped[stop_index].Not()) 
+                visit_variables.append(is_dropped[stop_index].Not())
                 #if the node is optional, we add it to the candidate group
         if visit_variables:
             model.add_exactly_one(visit_variables)
 
+
+def _add_excluded_stops_constraint(model: cp_model.CpModel, solver_input: SolverInput, is_dropped: dict) -> None:
     ## excluded/deleted stops
     # if a user deletes a stop, we can have the solver treat it as dead
     for stop_index in solver_input.excluded_stops:
@@ -326,27 +337,27 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             model.add(is_dropped[stop_index] == 1)
 
 
+def _add_precedence_constraints(model: cp_model.CpModel, solver_input: SolverInput, arrival_time: list) -> None:
     ## precedence constraint
     # force one node to occur before the other (but not necessarily immediately before)
     for before_index, after_index in solver_input.precedences:
         gap = solver_input.nodes[before_index].duration_in_minutes
         model.add(arrival_time[after_index] - arrival_time[before_index] >= gap)
 
+
+def _add_forced_edges_constraint(model: cp_model.CpModel, solver_input: SolverInput, edge: dict) -> None:
     ## forced edges constraint
     # force one node to occur immediately before the other
     for before_index, after_index in solver_input.forced_edges:
         if (before_index, after_index) in edge:
             model.add(edge[(before_index, after_index)] == 1)
 
+
+def _build_objective(solver_input: SolverInput, config: SolverConfig, edge: dict, cumulative_cost: list, is_dropped: dict, idle_time: dict, duration_ext: list, num_nodes: int) -> list:
     ## objective function
     # defines how a route is scored by the time,cost and drop penalties, the solver will try to minimize this score
 
-    if solver_input.route_variant == RouteVariant.TIME_OPTIMIZED:
-        time_w, cost_w, penalty_w = 100, 0, 1000
-    elif solver_input.route_variant == RouteVariant.COST_OPTIMIZED:
-        time_w, cost_w, penalty_w = 0, 100, 1000
-    else:  #BALANCED
-        time_w, cost_w, penalty_w = 50, 50, 1000
+    time_w, cost_w, penalty_w = config.time_w, config.cost_w, config.penalty_w
 
     objective_terms = []
 
@@ -369,136 +380,30 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             objective_terms.append(drop_variable * drop_penalty * penalty_w)
 
     #idle penalty
-    idle_w = 50  #penalize each minute of dead time
+    idle_w = config.idle_w  #penalize each minute of dead time
     for (from_index, to_index), idle_var in idle_time.items():
         objective_terms.append(idle_var * idle_w)
 
 
 
     ## duration extension penalty
-    duration_ext_w = 30
+    duration_ext_w = config.duration_ext_w
     for i in range(num_nodes):
         if i in (solver_input.start_index, solver_input.end_index):
             continue
         objective_terms.append(duration_ext[i] * duration_ext_w)
 
+    return objective_terms
 
 
-
-
-    model.minimize(sum(objective_terms))
-
-    
-
-
-
-
-
-
+def _configure_solver(config: SolverConfig) -> cp_model.CpSolver:
     #### SOLVER
     solver = cp_model.CpSolver()
 
     ## MAX RUN TIME
-    solver.parameters.max_time_in_seconds = 4.0
+    solver.parameters.max_time_in_seconds = config.max_time_in_seconds
 
-    solver.parameters.num_search_workers = 8
+    solver.parameters.num_search_workers = config.num_search_workers
     solver.parameters.enumerate_all_solutions = False
 
-    status = solver.solve(model)
-
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return SolverOutput(has_solution=False)
-    
-    
-    return _extract_solution(solver, solver_input, edge, is_dropped, arrival_time,
-                         cumulative_cost, duration, needs_virtual_end, 
-                          round_trip, activity_start)
-
-    
-def _extract_solution (
-        solver: cp_model.CpSolver,
-        solver_input: SolverInput,
-        edge: dict,
-        is_dropped: dict,
-        arrival_time: list,
-        cumulative_cost: list,
-        duration: list,
-        has_virtual_end: bool = False,
-        round_trip: bool = False,
-        activity_start: list = None
-        
-) -> SolverOutput:
-    ## goes from start to finish over each active edge to build a route
-    num_nodes = len(solver_input.nodes)
-    route = []
-    current_index = solver_input.start_index
-    visited = set()
-
-    while True:
-
-        arrival_time_for_current = solver.Value(arrival_time[current_index])
-        activity_start_for_current = solver.Value(activity_start[current_index])
-        departure_time_for_current = activity_start_for_current + solver.Value(duration[current_index])
-    
-        route.append(RouteEntry(
-            node_index=current_index,
-            arrival_time_in_minutes=arrival_time_for_current,
-            departure_time_in_minutes=departure_time_for_current
-        ))
-        visited.add(current_index)
-
-        if current_index == solver_input.end_index:
-            break
-
-        #find next node
-        found_next = False
-        for j in range(num_nodes):
-            if j in visited or j == current_index:
-                continue
-            if (current_index, j) in edge and solver.Value(edge[(current_index, j)]) == 1:
-                current_index = j
-                found_next = True
-                break
-
-        if not found_next:
-            raise Exception("No next node found in solution path")
-        
-    # collect dropped stops
-    dropped = [index for index, drop_variable in is_dropped.items() if solver.Value(drop_variable)]   
-   
-    if has_virtual_end:
-        terminal_index = solver_input.end_index #still virtual_end at this point
-    else:
-        terminal_index = route[-1].node_index
-
-        
-    total_route_cost = solver.Value(cumulative_cost[terminal_index])
-
-    if has_virtual_end and route:
-        virtual_entry = route.pop()  # remove dummy end node
-        if round_trip:
-            #add the real start node back as the final stop to represent returning home
-            route.append(RouteEntry(
-                node_index=solver_input.start_index,
-                arrival_time_in_minutes=virtual_entry.arrival_time_in_minutes,
-                departure_time_in_minutes=virtual_entry.arrival_time_in_minutes,
-            ))
-
-
-    # get total travel time for the route
-    total_Travel_time_in_minutes = 0
-    for i in range(1,len(route)):
-        prev_index = route[i-1].node_index
-        current_index = route[i].node_index
-        total_Travel_time_in_minutes += solver_input.travel_time_matrix_in_minutes[prev_index][current_index]
-
-    
-
-    return SolverOutput (
-        route=route,
-        dropped_stops = dropped,
-        total_time_in_minutes=total_Travel_time_in_minutes,
-        total_cost_in_cents=total_route_cost,
-        score= int(solver.objective_value),
-        has_solution=True
-    )
+    return solver
