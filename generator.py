@@ -369,14 +369,14 @@ def generate_route(solver_input: SolverInput) -> SolverOutput:
             objective_terms.append(drop_variable * drop_penalty * penalty_w)
 
     #idle penalty
-    idle_w = 50  #penalize each minute of dead time
+    idle_w = 55  #penalize each minute of dead time
     for (from_index, to_index), idle_var in idle_time.items():
         objective_terms.append(idle_var * idle_w)
 
 
 
     ## duration extension penalty
-    duration_ext_w = 30
+    duration_ext_w = 45
     for i in range(num_nodes):
         if i in (solver_input.start_index, solver_input.end_index):
             continue
